@@ -39,7 +39,7 @@ The video is rendered to a render target and applied as a texture on the object'
 
 | Mod | Required | Why |
 |---|---|---|
-| **CBA_A3** | yes | cTab dependency |
+| **CBA_A3** | yes | cTab dependency, and `CBA_fnc_getFov` measures the operator's zoom |
 | **cTab** | yes | the `ItemcTabHCam` item and the `cTab_fnc_checkGear` function are used to identify operators |
 | **ACE3** | optional | if present the menu uses ACE interaction, otherwise it falls back to `addAction` |
 
@@ -69,6 +69,10 @@ On startup the synchronized monitors are read from `synchronizedObjects this`, a
 ### How many monitors
 
 `_rt_slots` (default `4`) is the number of distinct render targets available. From the fifth monitor onwards render targets get recycled and two screens will steal each other's image. You can raise it, but every active render target is one more scene rendered every frame: two or three feeds running at once is already a serious load.
+
+Render targets are assigned by the server, one per monitor, in the order the screens were synchronized, and the clients only read the value: no two machines can end up disagreeing on who owns which target.
+
+`_rt_base` (default `0`) shifts the whole block. Render target names are shared with everything else running in the game, so if another mod already holds the first slots — cTAB Advanced, for one, sits on 8, 9, 12 and 13 — point the base at a free number and every monitor moves out of the way at once.
 
 ---
 
@@ -348,6 +352,25 @@ The array runs from widest to narrowest, so a higher index means tighter. Zoom d
 
 *At the widest step only Zoom In shows: Zoom Out appears from Medium onwards.*
 
+### Following the operator's zoom
+
+```sqf
+private _follow_operator_zoom = true;
+private _operator_fov_step = 0.004;
+private _operator_fov_interval = 0.15;
+private _operator_fov_scale = 1;
+```
+
+When a **player** is looking through the vehicle — sitting in the turret, or connected to a drone from the UAV terminal — the feed reproduces his zoom instead of the fixed steps. Connecting to that turret starts from exactly what he is framing, and the three steps become relative: the first one is his own view, the other two can only narrow down from there. The monitor never goes wider than the operator.
+
+The field of view can only be measured on the machine that is drawing that view, so the operator's own client measures it and publishes it on the vehicle, and the monitors read it from there. The measurement is taken every `_operator_fov_interval` seconds and only sent when it moves by more than `_operator_fov_step`, so a feed that is sitting still costs no traffic.
+
+The last value stays on the vehicle after the operator leaves the station: zoom into a drone's FLIR, walk back to the command post, and you find the monitor framed the way you left it. If nobody is looking through the vehicle at all — AI gunner, drone with no one at the terminal — there is nothing to mirror and the fixed steps take over.
+
+`_operator_fov_scale` (default `1`) multiplies the mirrored value, for when the feed comes out consistently wider or narrower than what the operator actually sees. `_follow_operator_zoom = false` turns the whole thing off and leaves the fixed steps in charge.
+
+### Vision modes
+
 ```sqf
 private _vision_modes = [
     ["Normal", [0]],
@@ -410,10 +433,15 @@ Ready-made rows to drop into the table:
 | `_rt_width` / `_rt_height` | `2048` | render target texture, powers of two |
 | `_rt_aspect` | `1.777` | framing ratio |
 | `_rt_slots` | `4` | distinct render targets available |
+| `_rt_base` | `0` | first render target used, shifts the whole block |
 | `_disable_dof` | `true` | disables depth of field |
 | `_turret_zoom_steps` | `0.25 0.05 0.0167` | turret zoom steps |
 | `_turret_zoom_names` | `Wide Medium Narrow` | step labels |
 | `_turret_zoom_default` | `0` | step on connect |
+| `_follow_operator_zoom` | `true` | mirror the operator's zoom on vehicle feeds |
+| `_operator_fov_step` | `0.004` | how far the zoom must move before it is published |
+| `_operator_fov_interval` | `0.15` | seconds between measurements |
+| `_operator_fov_scale` | `1` | multiplier on the mirrored zoom |
 | `_vision_modes` | `Normal`, `Night` | vision modes |
 | `_helmet_cam_offset` | `[0.2, 0, 0.175]` | helmet cam offset |
 | `_helmet_cam_pitch` / `_yaw` / `_roll` | `0` | helmet cam orientation |
@@ -440,6 +468,7 @@ Ready-made rows to drop into the table:
 | Variable | Default | What it does |
 |---|---|---|
 | `_spotter_fov_debug` | `false` | logs spotter zoom values to the .rpt |
+| `_operator_fov_debug` | `false` | logs the mirrored zoom to the system chat and the .rpt |
 
 ---
 
@@ -448,10 +477,25 @@ Ready-made rows to drop into the table:
 On startup, in the `.rpt`:
 
 ```
-[QG_ArTeK_Camera_Feeds] versione 4.8
+[QG_ArTeK_Camera_Feeds] versione 4.13
 ```
 
 If it is not there, the script is not running. If the number differs from what you expect, you are loading an old file.
+
+Right after it, one line per monitor with the render target it was handed:
+
+```
+[QG_ArTeK_Camera_Feeds] monitor 0 render target 0
+[QG_ArTeK_Camera_Feeds] init monitor ARTEK_monitor_0 su rendertarget0
+```
+
+Two screens on the same number means they are sharing a target and will steal each other's image: raise `_rt_slots`, or move the block with `_rt_base` if another mod is in the way.
+
+Once the mission is up, at the first pass of the zoom mirroring:
+
+```
+[QG_ArTeK_Camera_Feeds] publisher FOV attivo, versione 4.13
+```
 
 On the first feed connection:
 
@@ -469,6 +513,14 @@ With `_spotter_fov_debug = true`, while a spotter feed is running:
 
 It is only written when the value changes, so it does not flood the log.
 
+With `_operator_fov_debug = true`, while you are the one looking through a vehicle, the system chat reports what is being published:
+
+```
+[ArTeK] B_UAV_02_dynamicLoadout_F terminale ARTEK_fov_[0] FOV 0.0429 [cba]
+```
+
+Left to right: the vehicle, how you were recognised (`terminale` from the UAV terminal, `posto` from a seat), the variable the value is published under, the measured field of view and where the measurement came from (`cba` or `obj`). Anything outside 0.005–1.6 is discarded and never reaches the monitor.
+
 ### Troubleshooting
 
 | Symptom | What to check |
@@ -480,6 +532,7 @@ It is only written when the value changes, so it does not flood the log.
 | planes never show up | set `_list_driver_seat` to `true`: a plane has no turrets |
 | the list is enormous | `_turret_filter` set to `"all"` includes every passenger seat; switch to `"gunner"` |
 | grainy image | PiP setting in the video options |
+| the monitor ignores the operator's zoom | is `_follow_operator_zoom` on? is a **player** actually looking through that vehicle? with an AI gunner there is nothing to mirror |
 
 ---
 
@@ -502,3 +555,5 @@ The cost falls on the **clients**, and it is one full scene render per running f
 **The optic frame does not enter the feed.** Reticle, black mask and designator readouts are interface drawn on the player's screen, not scene geometry: a render target only renders the 3D scene. The feed reproduces framing and magnification, not the optic's graphics.
 
 **An object very close to the lens comes out faceted**, because PiP uses reduced levels of detail. It is not a resolution issue.
+
+**Only a player's zoom can be mirrored.** The field of view is measured on the machine drawing that view, so a turret in AI hands publishes nothing and the feed falls back to the fixed steps.
