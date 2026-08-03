@@ -1,4 +1,4 @@
-ARTEK_OperatorCam_Version = "4.8";
+ARTEK_OperatorCam_Version = "4.13";
 diag_log format ["[QG_ArTeK_Camera_Feeds] versione %1", ARTEK_OperatorCam_Version];
 
 private _feed_operator = true;
@@ -55,12 +55,19 @@ private _rt_height = 2048;
 private _rt_aspect = 1.777;
 
 private _rt_slots = 4;
+private _rt_base = 0;
 
 private _disable_dof = true;
 
 private _turret_zoom_steps = [0.25, 0.05, 0.0167];
 private _turret_zoom_names = ["Wide", "Medium", "Narrow"];
 private _turret_zoom_default = 0;
+
+private _follow_operator_zoom = true;
+private _operator_fov_step = 0.004;
+private _operator_fov_interval = 0.15;
+private _operator_fov_debug = false;
+private _operator_fov_scale = 1;
 
 private _string_side_west = "BLUFOR";
 private _string_side_east = "OPFOR";
@@ -124,10 +131,16 @@ if (isServer) then {
     missionNamespace setVariable ["ARTEK_rt_height", _rt_height, true];
     missionNamespace setVariable ["ARTEK_rt_aspect", _rt_aspect, true];
     missionNamespace setVariable ["ARTEK_rt_slots", _rt_slots, true];
+    missionNamespace setVariable ["ARTEK_rt_base", _rt_base, true];
     missionNamespace setVariable ["ARTEK_disable_dof", _disable_dof, true];
     missionNamespace setVariable ["ARTEK_turret_zoom_steps", _turret_zoom_steps, true];
     missionNamespace setVariable ["ARTEK_turret_zoom_names", _turret_zoom_names, true];
     missionNamespace setVariable ["ARTEK_turret_zoom_default", _turret_zoom_default, true];
+    missionNamespace setVariable ["ARTEK_follow_operator_zoom", _follow_operator_zoom, true];
+    missionNamespace setVariable ["ARTEK_operator_fov_step", _operator_fov_step, true];
+    missionNamespace setVariable ["ARTEK_operator_fov_interval", _operator_fov_interval, true];
+    missionNamespace setVariable ["ARTEK_operator_fov_debug", _operator_fov_debug, true];
+    missionNamespace setVariable ["ARTEK_operator_fov_scale", _operator_fov_scale, true];
     missionNamespace setVariable ["ARTEK_vision_modes", _vision_modes, true];
     missionNamespace setVariable ["ARTEK_rule_sides", _rule_sides, true];
     missionNamespace setVariable ["ARTEK_veh_rules", _veh_rules, true];
@@ -154,10 +167,13 @@ if (isServer) then {
         missionNamespace setVariable ["ARTEK_use_ace_interaction", true, true];
     };
 
+    private _slotCount = _rt_slots max 1;
     private _ARTEK_OperatorCam_SyncConfig = [];
     {
         _ARTEK_OperatorCam_SyncConfig pushBack _x;
         _x setVehicleVarName format ["ARTEK_monitor_%1", _forEachIndex];
+        _x setVariable ["operatorRenderTarget", format ["rendertarget%1", _rt_base + (_forEachIndex mod _slotCount)], true];
+        diag_log format ["[QG_ArTeK_Camera_Feeds] monitor %1 render target %2", _forEachIndex, _rt_base + (_forEachIndex mod _slotCount)];
     } forEach synchronizedObjects this;
     missionNamespace setVariable ["ARTEK_OperatorCam_SyncConfig", _ARTEK_OperatorCam_SyncConfig, true];
 };
@@ -477,9 +493,21 @@ ARTEK_fnc_changeVisionMode = {
     hintSilent format ["Vision: %1", (_modes select _new) select 0];
 };
 
+ARTEK_fnc_zoomFactor = {
+    params ["_monitor"];
+    private _steps = missionNamespace getVariable ["ARTEK_turret_zoom_steps", [0.25, 0.05, 0.0167]];
+    if (count _steps == 0) exitWith { 1 };
+    private _i = _monitor getVariable ["zoomIndex", 0];
+    if (_i < 0 || {_i >= count _steps}) then { _i = 0; };
+    private _first = _steps select 0;
+    if (_first <= 0) exitWith { 1 };
+    (_steps select _i) / _first
+};
+
 ARTEK_fnc_applyZoom = {
     params ["_monitor"];
     if (isNull _monitor) exitWith {};
+    if (_monitor getVariable ["fovMirrored", false]) exitWith {};
     private _cam = _monitor getVariable ["vehicleCam", objNull];
     if (isNull _cam) exitWith {};
     private _steps = missionNamespace getVariable ["ARTEK_turret_zoom_steps", [0.25, 0.05, 0.0167]];
@@ -518,6 +546,157 @@ ARTEK_fnc_zoomAtLimit = {
     private _cur = _monitor getVariable ["zoomIndex", 0];
     private _new = ((_cur + _dir) max 0) min ((count _steps) - 1);
     _new == _cur
+};
+
+ARTEK_fnc_fovKey = {
+    params ["_turretPath"];
+    format ["ARTEK_fov_%1", _turretPath]
+};
+
+ARTEK_fnc_measureFov = {
+    private _f = 0;
+    private _src = "none";
+    if (!isNil "CBA_fnc_getFov") then {
+        private _r = call CBA_fnc_getFov;
+        if (_r isEqualType []) then {
+            _r = if (count _r > 0) then { _r select 0 } else { 0 };
+        };
+        if (_r isEqualType 0 && {_r > 0.005} && {_r < 1.6}) then {
+            _f = _r;
+            _src = "cba";
+        };
+    };
+    if (_f <= 0.001) then {
+        private _g = getObjectFOV player;
+        if (_g isEqualType []) then {
+            _g = if (count _g > 0) then { _g select 0 } else { 0 };
+        };
+        if (_g isEqualType 0 && {_g > 0.005} && {_g < 1.6}) then {
+            _f = _g;
+            _src = "obj";
+        };
+    };
+    [_f, _src]
+};
+
+ARTEK_fnc_uavGunnerPath = {
+    params ["_veh"];
+    private _turrets = allTurrets [_veh, false];
+    private _out = [];
+    {
+        private _tc = [_veh, _x] call BIS_fnc_turretConfig;
+        if ((getNumber (_tc >> "isCopilot")) != 1) exitWith { _out = _x; };
+    } forEach _turrets;
+    if (_out isEqualTo [] && {count _turrets > 0}) then { _out = _turrets select 0; };
+    _out
+};
+
+ARTEK_fnc_playerTurretPath = {
+    params ["_veh"];
+    private _role = assignedVehicleRole player;
+    if (count _role > 1 && {(_role select 0) == "Turret"}) exitWith { _role select 1 };
+    if ((driver _veh) == player) exitWith { [-1] };
+    private _out = [];
+    {
+        if ((_veh turretUnit _x) == player) exitWith { _out = _x; };
+    } forEach (allTurrets [_veh, true]);
+    _out
+};
+
+ARTEK_fnc_fovTick = {
+    private _now = diag_tickTime;
+    if (_now < (missionNamespace getVariable ["ARTEK_fov_nextTick", 0])) exitWith {};
+    missionNamespace setVariable ["ARTEK_fov_nextTick", _now + (missionNamespace getVariable ["ARTEK_operator_fov_interval", 0.15])];
+    if (isNull player) exitWith {};
+
+    private _debug = missionNamespace getVariable ["ARTEK_operator_fov_debug", false];
+
+    if (isNil "ARTEK_fov_hello") then {
+        ARTEK_fov_hello = true;
+        diag_log format ["[QG_ArTeK_Camera_Feeds] publisher FOV attivo, versione %1", ARTEK_OperatorCam_Version];
+        if (_debug) then { systemChat format ["[ArTeK] Camera Feeds %1 attivo", ARTEK_OperatorCam_Version]; };
+    };
+
+    private _veh = objNull;
+    private _path = [];
+    private _how = "";
+
+    private _c = cameraOn;
+    if (!isNull _c && {_c != player} && {!(_c isKindOf "CAManBase")} && {_c isKindOf "AllVehicles"}) then {
+        _veh = _c;
+        private _uav = getConnectedUAV player;
+        if (!isNull _uav && {_uav isEqualTo _veh}) then {
+            private _ctrl = UAVControl _uav;
+            _path = if (count _ctrl > 1 && {(_ctrl select 1) == "DRIVER"}) then { [-1] } else { [_uav] call ARTEK_fnc_uavGunnerPath };
+            _how = "terminale";
+        } else {
+            _path = [_veh] call ARTEK_fnc_playerTurretPath;
+            _how = "posto";
+        };
+        if (_path isEqualTo []) then { _path = [_veh] call ARTEK_fnc_uavGunnerPath; };
+    };
+
+    private _lastVeh = missionNamespace getVariable ["ARTEK_fov_lastVeh", objNull];
+    private _lastKey = missionNamespace getVariable ["ARTEK_fov_lastKey", ""];
+    private _lastVal = missionNamespace getVariable ["ARTEK_fov_lastVal", -1];
+
+    if (isNull _veh) then {
+        if (_debug && {_lastKey != ""}) then { systemChat "[ArTeK] operatore: nessuna postazione"; };
+        missionNamespace setVariable ["ARTEK_fov_lastVeh", objNull];
+        missionNamespace setVariable ["ARTEK_fov_lastKey", ""];
+        missionNamespace setVariable ["ARTEK_fov_lastVal", -1];
+    } else {
+        private _key = [_path] call ARTEK_fnc_fovKey;
+        private _fresh = (!(_lastVeh isEqualTo _veh)) || {_key != _lastKey};
+        if (_fresh) then { _lastVal = -1; };
+        (call ARTEK_fnc_measureFov) params ["_fov", "_src"];
+        if (_fov > 0.001 && {abs (_fov - _lastVal) > (missionNamespace getVariable ["ARTEK_operator_fov_step", 0.004])}) then {
+            _veh setVariable [_key, _fov, true];
+            _veh setVariable ["ARTEK_fov_last", _fov, true];
+            _lastVal = _fov;
+            if (_debug) then {
+                systemChat format ["[ArTeK] %1 %2 %3 FOV %4 [%5]", typeOf _veh, _how, _key, (_fov toFixed 4), _src];
+            };
+        } else {
+            if (_debug && {_fresh}) then {
+                systemChat format ["[ArTeK] %1 %2 %3 misura %4 [%5]", typeOf _veh, _how, _key, (_fov toFixed 4), _src];
+            };
+        };
+        missionNamespace setVariable ["ARTEK_fov_lastVeh", _veh];
+        missionNamespace setVariable ["ARTEK_fov_lastKey", _key];
+        missionNamespace setVariable ["ARTEK_fov_lastVal", _lastVal];
+    };
+};
+
+ARTEK_fnc_followOperatorFov = {
+    params ["_monitor", "_cam", "_vehicle"];
+    if (isNull _cam || {isNull _vehicle} || {isNull _monitor}) exitWith {};
+    if (!(_monitor getVariable ["operatorFeedActive", false])) exitWith {};
+    if (!(missionNamespace getVariable ["ARTEK_follow_operator_zoom", true])) exitWith {};
+
+    private _base = _vehicle getVariable [[_monitor getVariable ["turretPath", []]] call ARTEK_fnc_fovKey, -1];
+    if (!(_base isEqualType 0) || {_base <= 0.001}) then {
+        _base = _vehicle getVariable ["ARTEK_fov_last", -1];
+    };
+    if (!(_base isEqualType 0)) then { _base = -1; };
+
+    if (_base > 0.001) then {
+        private _fov = _base * ([_monitor] call ARTEK_fnc_zoomFactor) * (missionNamespace getVariable ["ARTEK_operator_fov_scale", 1]);
+        if (_fov < 0.005) then { _fov = 0.005; };
+        if (_fov > 1.5) then { _fov = 1.5; };
+        _monitor setVariable ["fovMirrored", true, false];
+        if (abs (_fov - (_monitor getVariable ["fovApplied", -1])) > 0.0005) then {
+            _monitor setVariable ["fovApplied", _fov, false];
+            _cam camSetFov _fov;
+            _cam camCommit 0;
+        };
+    } else {
+        if (_monitor getVariable ["fovMirrored", false]) then {
+            _monitor setVariable ["fovMirrored", false, false];
+            _monitor setVariable ["fovApplied", -1, false];
+            [_monitor] call ARTEK_fnc_applyZoom;
+        };
+    };
 };
 
 ARTEK_fnc_upFromDir = {
@@ -625,6 +804,8 @@ ARTEK_fnc_updateVehicleFeed = {
         private _dirModel = [_vehicle, _monitor] call ARTEK_fnc_getTurretDirModel;
         _cam setVectorDirAndUp [_dirModel, [_dirModel] call ARTEK_fnc_upFromDir];
     };
+
+    [_monitor, _monitor getVariable ["vehicleCam", objNull], _vehicle] call ARTEK_fnc_followOperatorFov;
 };
 
 ARTEK_fnc_updateSpotterFeed = {
@@ -754,6 +935,8 @@ ARTEK_fnc_startVehicleFeed = {
     _monitor setVariable ["feedType", "vehicle", true];
     _monitor setVariable ["visionMode", 0, false];
     _monitor setVariable ["zoomIndex", missionNamespace getVariable ["ARTEK_turret_zoom_default", 0], false];
+    _monitor setVariable ["fovMirrored", false, false];
+    _monitor setVariable ["fovApplied", -1, false];
 
     private _cameraPoints = [_vehicle, _turretPath] call ARTEK_fnc_getTurretCamPoints;
     private _posPoint = _cameraPoints select 0;
@@ -828,6 +1011,8 @@ ARTEK_fnc_stopOperatorFeed = {
     _monitor setVariable ["feedType", "none", true];
     _monitor setVariable ["visionMode", 0, false];
     _monitor setVariable ["zoomIndex", missionNamespace getVariable ["ARTEK_turret_zoom_default", 0], false];
+    _monitor setVariable ["fovMirrored", false, false];
+    _monitor setVariable ["fovApplied", -1, false];
 };
 
 ARTEK_fnc_startFeedRemote = {
@@ -1246,11 +1431,17 @@ ARTEK_fnc_selectTabbedDialog = {
 ARTEK_fnc_initOperatorCam = {
     params ["_monitor"];
     removeAllActions _monitor;
-    private _slots = missionNamespace getVariable ["ARTEK_rt_slots", 4];
-    if (_slots < 1) then { _slots = 1; };
-    private _renderIndex = ARTEK_OperatorCam_Index mod _slots;
-    ARTEK_OperatorCam_Index = ARTEK_OperatorCam_Index + 1;
-    _monitor setVariable ["operatorRenderTarget", format["rendertarget%1", _renderIndex], true];
+    private _assigned = _monitor getVariable ["operatorRenderTarget", ""];
+    if (_assigned isEqualTo "") then {
+        private _slots = missionNamespace getVariable ["ARTEK_rt_slots", 4];
+        if (_slots < 1) then { _slots = 1; };
+        private _base = missionNamespace getVariable ["ARTEK_rt_base", 0];
+        private _renderIndex = _base + (ARTEK_OperatorCam_Index mod _slots);
+        ARTEK_OperatorCam_Index = ARTEK_OperatorCam_Index + 1;
+        _assigned = format ["rendertarget%1", _renderIndex];
+        _monitor setVariable ["operatorRenderTarget", _assigned, true];
+    };
+    diag_log format ["[QG_ArTeK_Camera_Feeds] init monitor %1 su %2", vehicleVarName _monitor, _assigned];
     _monitor setVariable ["operatorFeedActive", false, true];
     _monitor setVariable ["feedType", "none", true];
 
@@ -1389,6 +1580,10 @@ ARTEK_fnc_initOperatorCam = {
 if (isServer) then {
     ARTEK_OperatorCam_Initialized = true;
     publicVariable "ARTEK_OperatorCam_Initialized";
+};
+
+if (hasInterface && {isNil "ARTEK_fovHandler"}) then {
+    ARTEK_fovHandler = addMissionEventHandler ["EachFrame", { call ARTEK_fnc_fovTick }];
 };
 
 {
