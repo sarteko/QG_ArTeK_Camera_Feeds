@@ -1,28 +1,30 @@
-ARTEK_OperatorCam_Version = "4.13";
+ARTEK_OperatorCam_Version = "4.16";
 diag_log format ["[QG_ArTeK_Camera_Feeds] versione %1", ARTEK_OperatorCam_Version];
 
 private _feed_operator = true;
 private _feed_turret = true;
 private _feed_spotter = true;
 
-private _show_additional_sides = [["blufor", true], ["opfor", true], ["independent", true], ["civilian", true]];
+private _show_additional_sides = [["blufor", true], ["opfor", false], ["independent", false], ["civilian", true]];
+private _captive_as_civilian = true;
+private _hide_empty_tabs = true;
 
 private _rule_sides = ["west", "east", "guer", "civ"];
 private _veh_rules = [
-    ["drone",  ["free", "free", "free", "free"]],
-    ["tank",   ["any",  "any",  "any",  "any" ]],
-    ["car",    ["any",  "any",  "any",  "any" ]],
-    ["plane",  ["any",  "any",  "any",  "any" ]],
-    ["heli",   ["any",  "any",  "any",  "any" ]],
-    ["boat",   ["any",  "any",  "any",  "any" ]],
-    ["static", ["hide", "hide", "hide", "hide"]]
+    ["drone",  ["any", "hide", "hide", "any"]],
+    ["tank",   ["player",  "hide",  "hide",  "player" ]],
+    ["car",    ["player",  "hide",  "hide",  "player" ]],
+    ["plane",  ["player",  "hide",  "hide",  "player" ]],
+    ["heli",   ["player",  "hide",  "hide",  "player" ]],
+    ["boat",   ["player",  "hide",  "hide",  "player" ]],
+    ["static", ["hide",  "hide",  "hide",  "hide"]]
 ];
 
 private _turret_filter = "gunner";
 private _list_driver_seat = true;
 
-private _operator_rules = ["any", "any", "any", "any"];
-private _spotter_rules  = ["any", "any", "any", "any"];
+private _operator_rules = ["any", "hide", "hide", "any"];
+private _spotter_rules  = ["player", "hide", "hide", "any"];
 
 private _spotter_optics = [
     "Nikon_DSLR_HUD", "Nikon_DSLR",
@@ -107,6 +109,8 @@ if (isServer) then {
     missionNamespace setVariable ["ARTEK_allow_groupNumber", _show_group_number, true];
     missionNamespace setVariable ["ARTEK_allow_distance", _show_distance, true];
     missionNamespace setVariable ["ARTEK_allowed_sides", _show_additional_sides, true];
+    missionNamespace setVariable ["ARTEK_captive_as_civilian", _captive_as_civilian, true];
+    missionNamespace setVariable ["ARTEK_hide_empty_tabs", _hide_empty_tabs, true];
     missionNamespace setVariable ["ARTEK_feed_operator", _feed_operator, true];
     missionNamespace setVariable ["ARTEK_feed_turret", _feed_turret, true];
     missionNamespace setVariable ["ARTEK_feed_spotter", _feed_spotter, true];
@@ -185,13 +189,19 @@ if (isNil "ARTEK_activeMonitors") then { ARTEK_activeMonitors = []; };
 ARTEK_fnc_objectSide = {
     params ["_obj"];
     if (isNull _obj) exitWith { civilian };
-    if (_obj isKindOf "CAManBase") exitWith { side (group _obj) };
+    private _asCiv = missionNamespace getVariable ["ARTEK_captive_as_civilian", true];
+    if (_obj isKindOf "CAManBase") exitWith {
+        private _sd = side (group _obj);
+        if (_asCiv && {captive _obj}) then { _sd = civilian; };
+        _sd
+    };
     private _s = side _obj;
     private _c = crew _obj;
     if (count _c > 0) then {
         private _u = effectiveCommander _obj;
         if (isNull _u) then { _u = _c select 0; };
         _s = side (group _u);
+        if (_asCiv && {captive _u}) then { _s = civilian; };
     };
     _s
 };
@@ -916,6 +926,8 @@ ARTEK_fnc_startOperatorFeed = {
 
     if (!hasInterface) exitWith {};
 
+    [_monitor] call ARTEK_fnc_dropFeedCams;
+
     private _cam = [_renderTarget] call ARTEK_fnc_makeFeedCam;
     _monitor setVariable ["operatorCam", _cam, false];
     [_monitor] call ARTEK_fnc_applyVision;
@@ -948,6 +960,8 @@ ARTEK_fnc_startVehicleFeed = {
 
     if (!hasInterface) exitWith {};
 
+    [_monitor] call ARTEK_fnc_dropFeedCams;
+
     private _cam = [_renderTarget] call ARTEK_fnc_makeFeedCam;
     _monitor setVariable ["vehicleCam", _cam, false];
 
@@ -978,6 +992,8 @@ ARTEK_fnc_startSpotterFeed = {
 
     if (!hasInterface) exitWith {};
 
+    [_monitor] call ARTEK_fnc_dropFeedCams;
+
     private _cam = [_renderTarget] call ARTEK_fnc_makeFeedCam;
     _monitor setVariable ["spotterCam", _cam, false];
     [_monitor] call ARTEK_fnc_applyVision;
@@ -985,12 +1001,9 @@ ARTEK_fnc_startSpotterFeed = {
     [_monitor] call ARTEK_fnc_updateSpotterFeed;
 };
 
-ARTEK_fnc_stopOperatorFeed = {
+ARTEK_fnc_dropFeedCams = {
     params ["_monitor"];
     if (isNull _monitor) exitWith {};
-    _monitor setVariable ["operatorFeedActive", false, true];
-    [_monitor] call ARTEK_fnc_unregisterFeed;
-
     {
         private _cam = _monitor getVariable [_x, objNull];
         if (!isNull _cam) then {
@@ -999,16 +1012,24 @@ ARTEK_fnc_stopOperatorFeed = {
             _monitor setVariable [_x, objNull, false];
         };
     } forEach ["operatorCam", "vehicleCam", "spotterCam"];
+};
+
+ARTEK_fnc_stopOperatorFeed = {
+    params ["_monitor"];
+    if (isNull _monitor) exitWith {};
+    _monitor setVariable ["operatorFeedActive", false, false];
+    [_monitor] call ARTEK_fnc_unregisterFeed;
+    [_monitor] call ARTEK_fnc_dropFeedCams;
 
     private _rt = _monitor getVariable ["operatorRenderTarget", "rendertarget0"];
     _rt setPiPEffect [0];
 
     private _textureIndex = [_monitor] call ARTEK_fnc_getOperatorTextureIndex;
-    _monitor setObjectTextureGlobal [_textureIndex, "a3\data_f\black_sum.paa"];
-    _monitor setVariable ["connectedOperator", objNull, true];
-    _monitor setVariable ["connectedVehicle", objNull, true];
-    _monitor setVariable ["connectedSpotter", objNull, true];
-    _monitor setVariable ["feedType", "none", true];
+    _monitor setObjectTexture [_textureIndex, "a3\data_f\black_sum.paa"];
+    _monitor setVariable ["connectedOperator", objNull, false];
+    _monitor setVariable ["connectedVehicle", objNull, false];
+    _monitor setVariable ["connectedSpotter", objNull, false];
+    _monitor setVariable ["feedType", "none", false];
     _monitor setVariable ["visionMode", 0, false];
     _monitor setVariable ["zoomIndex", missionNamespace getVariable ["ARTEK_turret_zoom_default", 0], false];
     _monitor setVariable ["fovMirrored", false, false];
@@ -1047,9 +1068,15 @@ ARTEK_fnc_switchFeed = {
 ARTEK_fnc_disconnectSingleMonitor = {
     params ["_monitorNetId"];
     private _monitor = objectFromNetId _monitorNetId;
-    if (!isNull _monitor) then {
-        [_monitor] call ARTEK_fnc_stopOperatorFeed;
+    if (isNull _monitor) exitWith {};
+    if (isServer) then {
+        _monitor setVariable ["operatorFeedActive", false, true];
+        _monitor setVariable ["feedType", "none", true];
+        _monitor setVariable ["connectedOperator", objNull, true];
+        _monitor setVariable ["connectedVehicle", objNull, true];
+        _monitor setVariable ["connectedSpotter", objNull, true];
     };
+    [_monitor] call ARTEK_fnc_stopOperatorFeed;
 };
 
 ARTEK_fnc_syncOperatorMonitorState = {
@@ -1225,6 +1252,9 @@ ARTEK_fnc_buildTurretTabs = {
         } forEach _rules;
         _tabs pushBack [_label, _tabColor, _groups];
     } forEach ([_caller] call ARTEK_fnc_activeSides);
+    if (missionNamespace getVariable ["ARTEK_hide_empty_tabs", true]) then {
+        _tabs = _tabs select { count (_x select 2) > 0 };
+    };
     _tabs
 };
 
@@ -1245,6 +1275,9 @@ ARTEK_fnc_buildUnitTabs = {
         };
         _tabs pushBack [_label, _tabColor, _groups];
     } forEach ([_caller] call ARTEK_fnc_activeSides);
+    if (missionNamespace getVariable ["ARTEK_hide_empty_tabs", true]) then {
+        _tabs = _tabs select { count (_x select 2) > 0 };
+    };
     _tabs
 };
 
@@ -1439,11 +1472,13 @@ ARTEK_fnc_initOperatorCam = {
         private _renderIndex = _base + (ARTEK_OperatorCam_Index mod _slots);
         ARTEK_OperatorCam_Index = ARTEK_OperatorCam_Index + 1;
         _assigned = format ["rendertarget%1", _renderIndex];
-        _monitor setVariable ["operatorRenderTarget", _assigned, true];
+        _monitor setVariable ["operatorRenderTarget", _assigned, isServer];
     };
     diag_log format ["[QG_ArTeK_Camera_Feeds] init monitor %1 su %2", vehicleVarName _monitor, _assigned];
-    _monitor setVariable ["operatorFeedActive", false, true];
-    _monitor setVariable ["feedType", "none", true];
+    if (isServer) then {
+        _monitor setVariable ["operatorFeedActive", false, true];
+        _monitor setVariable ["feedType", "none", true];
+    };
 
     if (!hasInterface) exitWith {};
 
@@ -1452,6 +1487,7 @@ ARTEK_fnc_initOperatorCam = {
         private _operators = [_caller] call ARTEK_fnc_getOperatorsWithCamera;
         if (count _operators == 0) exitWith { hintSilent (missionNamespace getVariable ["ARTEK_string_nocams_hint", "No operators with cameras available"]); };
         private _tabs = [_operators, _caller, ARTEK_fnc_buildOperatorList] call ARTEK_fnc_buildUnitTabs;
+        if (count _tabs == 0) exitWith { hintSilent (missionNamespace getVariable ["ARTEK_string_nocams_hint", "No operators with cameras available"]); };
         [
             missionNamespace getVariable ["ARTEK_string_interactionMenu_select", "Select Operator"],
             _tabs,
@@ -1491,6 +1527,7 @@ ARTEK_fnc_initOperatorCam = {
         private _spotters = [_caller] call ARTEK_fnc_getSpottersWithOptics;
         if (count _spotters == 0) exitWith {hintSilent "No spotters with optics available";};
         private _tabs = [_spotters, _caller, ARTEK_fnc_buildSpotterList] call ARTEK_fnc_buildUnitTabs;
+        if (count _tabs == 0) exitWith {hintSilent "No spotters with optics available";};
         [
             "Select Spotter",
             _tabs,
@@ -1574,6 +1611,23 @@ ARTEK_fnc_initOperatorCam = {
         _monitor addAction [_labelZoomIn, _statement_zoomIn, nil, 1.06, true, true, "", str _condition_zoomIn];
         _monitor addAction [_labelZoomOut, _statement_zoomOut, nil, 1.05, true, true, "", str _condition_zoomOut];
         _monitor addAction [missionNamespace getVariable ["ARTEK_string_interactionMenu_disconnect", "Disconnect Camera"], _statement_disconnect_cams, nil, 1.0, true, true, "", str _condition_disconnect_cams];
+    };
+
+    if (_monitor getVariable ["operatorFeedActive", false]) then {
+        switch (_monitor getVariable ["feedType", "none"]) do {
+            case "operator": {
+                private _u = _monitor getVariable ["connectedOperator", objNull];
+                if (!isNull _u) then { [_monitor, _u] call ARTEK_fnc_startOperatorFeed; };
+            };
+            case "vehicle": {
+                private _v = _monitor getVariable ["connectedVehicle", objNull];
+                if (!isNull _v) then { [_monitor, _v, _monitor getVariable ["turretPath", []]] call ARTEK_fnc_startVehicleFeed; };
+            };
+            case "spotter": {
+                private _sp = _monitor getVariable ["connectedSpotter", objNull];
+                if (!isNull _sp) then { [_monitor, _sp] call ARTEK_fnc_startSpotterFeed; };
+            };
+        };
     };
 };
 
